@@ -10,6 +10,7 @@ public class DeviceMetric
 
     String deviceMetricName;
     String deviceMetricValue;
+    int isAttentionRequired;
 
     public String getDeviceMetricName() {
         return deviceMetricName;
@@ -30,5 +31,13 @@ public class DeviceMetric
 
     public void setDeviceMetricValue(String deviceMetricValue) {
         this.deviceMetricValue = deviceMetricValue;
+    }
+
+    public int isAttentionRequired() {
+        return isAttentionRequired;
+    }
+
+    public void setIsAttentionRequired(int isAttentionRequired) {
+        this.isAttentionRequired = isAttentionRequired;
     }
 }

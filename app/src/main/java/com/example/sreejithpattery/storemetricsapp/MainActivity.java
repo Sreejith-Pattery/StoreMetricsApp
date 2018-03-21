@@ -1,64 +1,58 @@
 package com.example.sreejithpattery.storemetricsapp;
 
 import android.app.Activity;
-import android.app.ActivityManager;
-import android.app.usage.UsageStats;
-import android.app.usage.UsageStatsManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageManager;
+import android.content.IntentSender;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.hardware.display.DisplayManager;
 import android.location.Location;
-import android.location.LocationListener;
 import android.location.LocationManager;
-import android.net.ConnectivityManager;
-import android.net.DhcpInfo;
-import android.net.NetworkInfo;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
-import android.os.Handler;
-import android.os.PowerManager;
-import android.provider.Settings;
 import android.os.Bundle;
-import android.text.TextUtils;
-import android.text.format.Formatter;
-import android.view.Display;
+import android.os.Handler;
+import android.support.v4.content.LocalBroadcastManager;
+import android.util.Log;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
 import android.widget.TabHost;
 import android.widget.Toast;
 
+import com.google.android.gms.analytics.GoogleAnalytics;
+import com.google.android.gms.analytics.HitBuilders;
+import com.google.android.gms.analytics.Tracker;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationServices;
+
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.text.DecimalFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Calendar;
+import java.util.Date;
 import java.util.List;
-import java.util.SortedMap;
-import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity implements SensorEventListener,
-        LocationListener
+        com.google.android.gms.location.LocationListener,
+        GoogleApiClient.ConnectionCallbacks,
+        GoogleApiClient.OnConnectionFailedListener
 {
     private List<DeviceMetric> deviceMetrics = new ArrayList<>();
     private List<DeviceMetric> batteryMetrics = new ArrayList<>();
     private List<DeviceMetric> otherMetrics = new ArrayList<>();
 
-    DeviceMetric cpuInfo;
-    DeviceMetric ramInfo;
-    DeviceMetric ramPerc;
-    DeviceMetric isMoving;
-    DeviceMetric latitude;
-    DeviceMetric longitude;
 
     GetStoreMetrics getStoreMetrics;
     private long avlMem;
@@ -68,7 +62,6 @@ public class MainActivity extends Activity implements SensorEventListener,
     private SensorManager sensorManager;
     private Sensor accelorometer;
     private LocationManager locationManager;
-
 
     // The minimum distance to change Updates in meters
     private static final long MIN_DISTANCE_CHANGE_FOR_UPDATES = 1;
@@ -83,16 +76,27 @@ public class MainActivity extends Activity implements SensorEventListener,
     private Handler handler;
     private Runnable r;
     private boolean shouldThreadRun = true;
+    private ArrayAdapter<DeviceMetric> otherListAdapter;
+
+    private Tracker mTracker;
+    GoogleAnalytics analytics;
+    private final static int CONNECTION_FAILURE_RESOLUTION_REQUEST = 9000;
+    private GoogleApiClient mGoogleApiClient;
+    private LocationRequest mLocationRequest;
+    private double currentLatitude;
+    private double currentLongitude;
+    private BroadcastReceiver receiver;
+    private BroadcastReceiver batteryReceiver;
+    private static final String BROADCAST_RESULT = "com.example.sreejithpattery.storemetricsapp.service_processed";
+    private static final String BROADCAST_MESSAGE = "com.example.sreejithpattery.storemetricsapp.broadcast_message";
+    private static final String BATTERYCHANGED_BROADCAST = "com.example.sreejithpattery.storemetricsapp.batterychange_broadcast";
+    private static final String BATTERYCHANGED_MESSAGE = "com.example.sreejithpattery.storemetricsapp.batterychange_message";
+    private ArrayAdapter<DeviceMetric> deviceListAdapter;
+    private ArrayAdapter<DeviceMetric> batteryListAdapter;
 
     @Override
     protected void onCreate(Bundle savedInstanceState)
     {
-        cpuInfo = new DeviceMetric("Current CPU Usage %","");
-        ramInfo = new DeviceMetric("RAM Usage MB","");
-        ramPerc = new DeviceMetric("RAM Usage %","");
-        isMoving = new DeviceMetric("Device Movement","");
-        latitude = new DeviceMetric("Device latitude","");
-        longitude = new DeviceMetric("Device longitude","");
 
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
@@ -101,9 +105,7 @@ public class MainActivity extends Activity implements SensorEventListener,
         accelorometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
-        this.registerReceiver(this.batteryInfoReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        getCurrentLocation();
-
+//        getCurrentLocation();
 
         TabHost tabHost = (TabHost) findViewById(R.id.tabHost);
         tabHost.setup();
@@ -125,267 +127,118 @@ public class MainActivity extends Activity implements SensorEventListener,
 
         getStoreMetrics = new GetStoreMetrics(this);
 
+        mGoogleApiClient = new GoogleApiClient.Builder(this)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .addApi(LocationServices.API)
+                .build();
+
+        mLocationRequest = LocationRequest.create()
+                .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY)
+                .setInterval(10*1000)
+                .setFastestInterval(1*1000);
+
+        StoreMetricsAppApplication application = (StoreMetricsAppApplication) getApplication();
+        mTracker = application.getDefaultTracker();
+        analytics = GoogleAnalytics.getInstance(this);
+
+        receiver = new BroadcastReceiver()
+        {
+            @Override
+            public void onReceive(Context context, Intent intent)
+            {
+                String s = intent.getStringExtra(BROADCAST_MESSAGE);
+                if(deviceListAdapter!=null)
+                {
+                    setMainDeviceMetrics();
+                    deviceListAdapter.notifyDataSetChanged();
+                }
+            }
+        };
+
+        batteryReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if(batteryListAdapter!=null)
+                {
+                    setBatteryMetrics();
+                    batteryListAdapter.notifyDataSetChanged();
+                }
+            }
+        };
+
     }
 
     private void loadOtherMetrics()
     {
-        ArrayAdapter<DeviceMetric> otherListAdapter = new OtherMetricsAdapter(this,R.layout.item_view,otherMetrics);
+        otherListAdapter = new OtherMetricsAdapter(this, R.layout.item_view,otherMetrics);
         ListView lstOtherMetrics = (ListView) findViewById(R.id.lstOtherMetrics);
         lstOtherMetrics.setAdapter(otherListAdapter);
     }
 
-    private void getOtherMetrics()
-    {
-        otherMetrics.clear();
-        otherMetrics.add(getCpuInfo());
-        otherMetrics.add(getRamInfo());
-        otherMetrics.add(getRamPerc());
-        otherMetrics.add(getIsMoving());
-        otherMetrics.add(getLatitude());
-        otherMetrics.add(getLongitude());
-    }
 
     private void loadDeviceMetrics()
     {
-        ArrayAdapter<DeviceMetric> deviceListAdapter = new DeviceListAdapter(this,R.layout.item_view,deviceMetrics);
+        deviceListAdapter = new DeviceListAdapter(this, R.layout.item_view,deviceMetrics);
         ListView lstDeviceMetrics = (ListView) findViewById(R.id.lstDeviceMetrics);
         lstDeviceMetrics.setAdapter(deviceListAdapter);
     }
 
+    private void loadBatteryMetrics()
+    {
+        batteryListAdapter = new OtherMetricsAdapter(this,R.layout.item_view,batteryMetrics);
+        ListView lstDeviceMetrics = (ListView) findViewById(R.id.lstBatteryMetrics);
+        lstDeviceMetrics.setAdapter(batteryListAdapter);
+    }
+
     private void setDeviceMetrics()
     {
+        StoreMetricsContainer.setDeviceMetrics();
+
+        setMainDeviceMetrics();
+
+        setBatteryMetrics();
+
+        otherMetrics.clear();
+        otherMetrics.add(StoreMetricsContainer.getCpuInfo());
+        otherMetrics.add(StoreMetricsContainer.getRamInfo());
+        otherMetrics.add(StoreMetricsContainer.getRamPerc());
+        otherMetrics.add(StoreMetricsContainer.getIsMoving());
+        otherMetrics.add(StoreMetricsContainer.getLatitude());
+        otherMetrics.add(StoreMetricsContainer.getLongitude());
+    }
+
+    private void setMainDeviceMetrics() {
         deviceMetrics.clear();
-        deviceMetrics.add(new DeviceMetric("Device Storage Remaining %",GetStoreMetrics.getAvailableInternalMemorySizePerc()));
-        deviceMetrics.add(new DeviceMetric("Device Storage Remaining MB",GetStoreMetrics.getAvailableInternalMemorySize() + " out of " + GetStoreMetrics.getTotalInternalMemorySize()));
-        deviceMetrics.add(new DeviceMetric("Foreground Application Bundle ID",getForegroundTask()));
-        deviceMetrics.add(new DeviceMetric("Foreground Application Name",getCurrentApplicationName(getForegroundTask())));
-        deviceMetrics.add(new DeviceMetric("Wifi Network", getCurrentSsid()));
-        deviceMetrics.add(new DeviceMetric("Wifi Signal Strength",getCurrentSignalStrength() + " out of 5"));
-        deviceMetrics.add(new DeviceMetric("Device IP",getIpAddress()));
-        deviceMetrics.add(new DeviceMetric("Device Gateway",getDeviceGateway()));
-        deviceMetrics.add(new DeviceMetric("Device Serial Number",GetStoreMetrics.getSerialNumber()));
-        deviceMetrics.add(new DeviceMetric("Screen State", getScreenState()));
-        deviceMetrics.add(new DeviceMetric("Screen Brightness",getScreenBrighness()));
-        deviceMetrics.add(new DeviceMetric("Foreground Application version", "Version No " + getForegroundApplicationVersion(getForegroundTask())));
+        deviceMetrics.add(StoreMetricsContainer.getDeviceStrgPerc());
+        deviceMetrics.add(StoreMetricsContainer.getDeviceStrgMB());
+        deviceMetrics.add(StoreMetricsContainer.getFrgrdAppID());
+        deviceMetrics.add(StoreMetricsContainer.getFrgrdAppName());
+        deviceMetrics.add(StoreMetricsContainer.getWifiName());
+        deviceMetrics.add(StoreMetricsContainer.getWifiStrngth());
+        deviceMetrics.add(StoreMetricsContainer.getDeviceIP());
+        deviceMetrics.add(StoreMetricsContainer.getDeviceGatewayMetric());
+        deviceMetrics.add(StoreMetricsContainer.getDeviceSerial());
+        deviceMetrics.add(StoreMetricsContainer.getScreenStateMetric());
+        deviceMetrics.add(StoreMetricsContainer.getScreenBrightness());
+        deviceMetrics.add(StoreMetricsContainer.getForeGroundAppVersion());
     }
 
-    public String getScreenBrighness()
+    private void setBatteryMetrics() {
+        if(batteryMetrics.size()>0)
+            batteryMetrics.clear();
+
+        batteryMetrics.add(StoreMetricsContainer.getBatteryHealth());
+        batteryMetrics.add(StoreMetricsContainer.getBatteryChargeLvl());
+        batteryMetrics.add(StoreMetricsContainer.getBatteryTmp());
+        batteryMetrics.add(StoreMetricsContainer.getBatteryChrgSts());
+    }
+
+
+    private float readUsage()
     {
-        String screenBrightness = "ERROR";
-        float curBrightnessValue=0;
-
-        curBrightnessValue =  getWindow().getAttributes().screenBrightness;
-
-        if(curBrightnessValue<0)
-        {
-
-            try {
-                curBrightnessValue = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS);
-                screenBrightness = String.valueOf(curBrightnessValue)+" out of 255";
-            } catch (Settings.SettingNotFoundException e) {
-                e.printStackTrace();
-            }
-        }
-        else
-        {
-            screenBrightness = String.valueOf(curBrightnessValue)+" out of 1";
-        }
-
-        return screenBrightness;
-    }
-
-    public String getForegroundTask()
-    {
-        String currentApp = "NULL";
-
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-        {
-            UsageStatsManager usm = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
-            long time = System.currentTimeMillis();
-            Calendar cal = Calendar.getInstance();
-            cal.add(Calendar.YEAR,-1);
-
-            List<UsageStats> appList = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY,cal.getTimeInMillis(),System.currentTimeMillis());
-            if(appList!=null && appList.size()>0)
-            {
-                SortedMap<Long,UsageStats> sortedMap = new TreeMap<>();
-                for (UsageStats usagestat:appList
-                        ) {
-                    sortedMap.put(usagestat.getLastTimeUsed(),usagestat);
-                }
-
-                if(sortedMap!=null && !sortedMap.isEmpty())
-                {
-                    currentApp = sortedMap.get(sortedMap.lastKey()).getPackageName();
-                }
-            }
-        }
-        else
-        {
-            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            List<ActivityManager.RunningAppProcessInfo> listProcesses= am.getRunningAppProcesses();
-            if(!listProcesses.isEmpty())
-            {
-                currentApp = listProcesses.get(0).processName;
-            }
-        }
-
-        return currentApp;
-    }
-
-    private WifiInfo getWifiInfo() {
-        final WifiManager wifiManager = (WifiManager) getSystemService(Context.WIFI_SERVICE);
-        return wifiManager.getConnectionInfo();
-    }
-
-    private NetworkInfo getNetworkInfo() {
-        ConnectivityManager connManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        return connManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
-    }
-
-    public int getCurrentSignalStrength()
-    {
-        int level = -1;
-        NetworkInfo networkInfo = getNetworkInfo();
-        if(networkInfo.isConnected())
-        {
-            final WifiInfo wifiInfo = getWifiInfo();
-            level = WifiManager.calculateSignalLevel(wifiInfo.getRssi(), 5);
-        }
-
-        return level;
-    }
-
-    public String getIpAddress()
-    {
-        String ipAddress = "ERROR";
-        NetworkInfo networkInfo = getNetworkInfo();
-        if(networkInfo.isConnected())
-        {
-            final WifiInfo wifiInfo = getWifiInfo();
-            ipAddress = Formatter.formatIpAddress(wifiInfo.getIpAddress());
-        }
-        return ipAddress;
-    }
-
-    @SuppressWarnings("deprecation")
-    public String getDHCPServer()
-    {
-        String dhcp_ipaddress = "ERROR";
-        NetworkInfo networkInfo = getNetworkInfo();
-        if(networkInfo.isConnected())
-        {
-            final WifiManager wifiManager = (WifiManager) getSystemService(Context.WIFI_SERVICE);
-            DhcpInfo dhcpInfo = wifiManager.getDhcpInfo();
-            dhcp_ipaddress = Formatter.formatIpAddress(dhcpInfo.serverAddress);
-        }
-
-        return dhcp_ipaddress;
-    }
-
-    @SuppressWarnings("deprecation")
-    public String getDeviceGateway()
-    {
-        String dhcp_gateway = "ERROR";
-        NetworkInfo networkInfo = getNetworkInfo();
-        if(networkInfo.isConnected())
-        {
-            final WifiManager wifiManager = (WifiManager) getSystemService(Context.WIFI_SERVICE);
-            DhcpInfo dhcpInfo = wifiManager.getDhcpInfo();
-            dhcp_gateway = Formatter.formatIpAddress(dhcpInfo.gateway);
-        }
-
-        return dhcp_gateway;
-
-    }
-
-
-    public String getCurrentSsid()
-    {
-        String ssid = "ERROR";
-        NetworkInfo networkInfo = getNetworkInfo();
-        if(networkInfo.isConnected())
-        {
-            final WifiInfo wifiInfo = getWifiInfo();
-            if(wifiInfo!=null && !TextUtils.isEmpty(wifiInfo.getSSID()))
-            {
-                ssid = wifiInfo.getSSID();
-            }
-        }
-        return ssid;
-    }
-
-
-
-    public String getCurrentApplicationName(String packageName)
-    {
-        PackageManager packageManager = getPackageManager();
-        String appName = "ERROR";
         try
         {
-            return (String) packageManager.getApplicationLabel((ApplicationInfo)packageManager.getApplicationInfo(packageName,0));
-        } catch (PackageManager.NameNotFoundException e)
-        {
-
-            e.printStackTrace();
-        }
-        return appName;
-    }
-
-    public String getScreenState()
-    {
-        String screenState = "ERROR";
-        if(Build.VERSION.SDK_INT >= 20)
-        {
-            DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-            for(Display display:displayManager.getDisplays())
-            {
-                if(display.getState()==Display.STATE_ON || display.getState()== Display.STATE_UNKNOWN)
-                {
-                    screenState = "Screen is ON";
-                }
-                else
-                {
-                    screenState = "Screen is OFF";
-                }
-            }
-        }
-        else
-        {
-            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if(powerManager.isScreenOn())
-            {
-                screenState = "Screen is ON";
-            }
-            else
-            {
-                screenState = "Screen is OFF";
-            }
-        }
-
-        return screenState;
-    }
-
-
-    public String getForegroundApplicationVersion(String packageName)
-    {
-        PackageManager packageManager = getApplicationContext().getPackageManager();
-        String appName = "ERROR";
-        try
-        {
-            return (String) packageManager.getPackageInfo(packageName,0).versionName;
-        }
-        catch (PackageManager.NameNotFoundException e)
-        {
-
-            e.printStackTrace();
-        }
-        return appName;
-
-    }
-
-    private float readUsage() {
-        try {
             RandomAccessFile reader = new RandomAccessFile("/proc/stat", "r");
             String load = reader.readLine();
 
@@ -394,9 +247,12 @@ public class MainActivity extends Activity implements SensorEventListener,
             long work1 = Long.parseLong(toks[1]) + Long.parseLong(toks[2]) + Long.parseLong(toks[3]);
             long total1 = Long.parseLong(toks[1]) + Long.parseLong(toks[2]) + Long.parseLong(toks[3]) + Long.parseLong(toks[4]) + Long.parseLong(toks[5]) + Long.parseLong(toks[6]) + Long.parseLong(toks[7]) + Long.parseLong(toks[8]);
 
-            try {
+            try
+            {
                 Thread.sleep(360);
-            } catch (Exception e) {
+            }
+            catch (Exception e)
+            {
             }
 
             reader.seek(0);
@@ -419,6 +275,45 @@ public class MainActivity extends Activity implements SensorEventListener,
         return 0;
     }
 
+    private MemorySize getMemorySize() {
+        final Pattern PATTERN = Pattern.compile("([a-zA-Z]+):\\s*(\\d+)");
+
+        MemorySize result = new MemorySize();
+        String line;
+        try {
+            RandomAccessFile reader = new RandomAccessFile("/proc/meminfo", "r");
+            while ((line = reader.readLine()) != null) {
+                Matcher m = PATTERN.matcher(line);
+                if (m.find()) {
+                    String name = m.group(1);
+                    String size = m.group(2);
+
+                    if (name.equalsIgnoreCase("MemTotal")) {
+                        result.total = Long.parseLong(size);
+                    } else if (name.equalsIgnoreCase("MemFree") || name.equalsIgnoreCase("Buffers") ||
+                            name.equalsIgnoreCase("Cached") || name.equalsIgnoreCase("SwapFree")) {
+                        result.free += Long.parseLong(size);
+                    }
+                }
+            }
+            reader.close();
+
+            result.total *= 1024;
+            result.free *= 1024;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+
+    private static class MemorySize {
+        public long total = 0;
+        public long free = 0;
+    }
+
+
+
     private void startRAMCPUThread()
     {
         handler = new Handler();
@@ -426,40 +321,50 @@ public class MainActivity extends Activity implements SensorEventListener,
             @Override
             public void run()
             {
-                if(shouldThreadRun) {
+                if(shouldThreadRun)
+                {
+                    /*
                     ActivityManager.MemoryInfo memoryInfo = new ActivityManager.MemoryInfo();
                     ActivityManager activityManager = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+
 
                     activityManager.getMemoryInfo(memoryInfo);
                     avlMem = memoryInfo.availMem / 1048576;
                     totMem = memoryInfo.totalMem / 1048576;
                     usedMem = ((memoryInfo.totalMem - memoryInfo.availMem)) / 1048576;
+                     */
 
-                    DeviceMetric cpuInfo = getCpuInfo();
-                    DeviceMetric ramInfo = getRamInfo();
-                    DeviceMetric ramPerc = getRamPerc();
+                    MemorySize memorySize = getMemorySize();
 
-                    cpuInfo.setDeviceMetricValue(String.valueOf(readUsage() * 100) + " %");
+                    avlMem = memorySize.free/1048576;
+                    totMem = memorySize.total/1048576;
+                    usedMem = totMem - avlMem;
+
+                    DeviceMetric cpuInfo = StoreMetricsContainer.getCpuInfo();
+                    DeviceMetric ramInfo = StoreMetricsContainer.getRamInfo();
+                    DeviceMetric ramPerc = StoreMetricsContainer.getRamPerc();
+
+                    //cpuInfo.setDeviceMetricValue(String.valueOf(readUsage() * 100) + " %");
+                    cpuInfo.setDeviceMetricValue(String.valueOf(getCpuUsageStatistic()) + " %");
+
                     ramInfo.setDeviceMetricValue(usedMem + " MB out of " + totMem + " MB");
-//                textViewCpuInfo.setText("Current CPU Usage %:\n" + String.valueOf(readUsage() * 100) + " %");
-//                textViewRAMInfo.setText("RAM Usage MB :\n" + usedMem + " MB out of " + totMem + " MB\n");
 
 
                     DecimalFormat df = new DecimalFormat("##.##");
 
                     if (totMem > 0) {
                         ramPerc.setDeviceMetricValue(df.format(((float) (totMem - avlMem) / (float) totMem) * 100) + " %");
-                        //.append("RAM Usage % :"+df.format(((float)(totMem-avlMem)/(float)totMem)*100)+" %");
                     }
 
-                    setCpuInfo(cpuInfo);
-                    setRamInfo(ramInfo);
-                    setRamPerc(ramPerc);
+                    //setCpuInfo(cpuInfo);
+                    //setRamInfo(ramInfo);
+                    //setRamPerc(ramPerc);
 
-                    getOtherMetrics();
-                    loadOtherMetrics();
+                    otherListAdapter.notifyDataSetChanged();
 
                     handler.postDelayed(this, 1000);
+
+
                 }
             }
 
@@ -469,196 +374,14 @@ public class MainActivity extends Activity implements SensorEventListener,
 
     }
 
-    private BroadcastReceiver batteryInfoReceiver = new BroadcastReceiver()
-    {
 
 
-        @Override
-        public void onReceive(Context context, Intent intent)
-        {
-
-            int health = intent.getIntExtra(BatteryManager.EXTRA_HEALTH, 0);
-//            int icon_small = intent.getIntExtra(BatteryManager.EXTRA_ICON_SMALL, 0);
-            int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 0);
-            int plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-            boolean present = intent.getExtras().getBoolean(BatteryManager.EXTRA_PRESENT);
-            int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 0);
-            int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, 0);
-            String technology = intent.getExtras().getString(BatteryManager.EXTRA_TECHNOLOGY);
-            int temperature = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0);
-            float fltemperature = temperature/10;
-            int voltage = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0);
-
-
-
-
-            String strHealth = "ERROR";
-            switch (health)
-            {
-                case BatteryManager.BATTERY_HEALTH_DEAD:
-                    strHealth = "BATTERY HEALTH DEAD";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_COLD:
-                    strHealth = "BATTERY HEALTH COLD";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_GOOD:
-                    strHealth = "BATTERY HEALTH GOOD";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE:
-                    strHealth = "BATTERY HEALTH OVERVOLTAGE";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_OVERHEAT:
-                    strHealth = "BATTERY HEALTH OVERHEAT";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_UNKNOWN:
-                    strHealth = "BATTERY HEALTH UNKNOWN";
-                    break;
-                case BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE:
-                    strHealth = "BATTERY HEALTH UNSPECIFIED FAILURE";
-                    break;
-                default:
-                    strHealth = "ERROR";
-            }
-
-            String strBatteryPlugged="ERROR";
-            switch (plugged)
-            {
-                case BatteryManager.BATTERY_PLUGGED_AC:
-                    strBatteryPlugged="BATTERY PLUGGED AC";
-                    break;
-                case BatteryManager.BATTERY_PLUGGED_USB:
-                    strBatteryPlugged="BATTERY PLUGGED USB";
-                    break;
-                case BatteryManager.BATTERY_PLUGGED_WIRELESS:
-                    strBatteryPlugged="BATTERY PLUGGED WIRELESS";
-                    break;
-                case 0:
-                    strBatteryPlugged="BATTERY DISCHARGING";
-                    break;
-                default:
-                    strBatteryPlugged="ERROR";
-                    break;
-            }
-
-            if(batteryMetrics.size()>0)
-                batteryMetrics.clear();
-
-            batteryMetrics.add(new DeviceMetric("Battery Health",strHealth));
-            batteryMetrics.add(new DeviceMetric("Battery Charge Level",level + " out of " +scale));
-            batteryMetrics.add(new DeviceMetric("Battery Temperature",fltemperature + " Degrees Celsius"));
-            batteryMetrics.add(new DeviceMetric("Device charging status",strBatteryPlugged));
-
-
-            if(Build.MODEL.equals("MC40N0"))
-            {
-                String serialnumber = "ERROR";
-                String mfd = "ERROR";
-                int cycle=0;
-
-                mfd = intent.getExtras().getString("mfd");
-                serialnumber = intent.getExtras().getString("serialnumber");
-                cycle = intent.getExtras().getInt("cycle");
-
-                batteryMetrics.add(new DeviceMetric("Battery Manufacture Date",mfd));
-                batteryMetrics.add(new DeviceMetric("Battery Serial Number",serialnumber));
-
-            }
-
-
-            ArrayAdapter<DeviceMetric> deviceListAdapter = new DeviceListAdapter(getBaseContext(),R.layout.item_view,batteryMetrics);
-            ListView lstDeviceMetrics = (ListView) findViewById(R.id.lstBatteryMetrics);
-            lstDeviceMetrics.setAdapter(deviceListAdapter);
-
-        }
-    };
-
-    public DeviceMetric getCpuInfo() {
-        return cpuInfo;
-    }
-
-    public void setCpuInfo(DeviceMetric cpuInfo) {
-        this.cpuInfo = cpuInfo;
-    }
-
-    public DeviceMetric getRamInfo() {
-        return ramInfo;
-    }
-
-    public void setRamInfo(DeviceMetric ramInfo) {
-        this.ramInfo = ramInfo;
-    }
-
-    public DeviceMetric getRamPerc() {
-        return ramPerc;
-    }
-
-    public void setRamPerc(DeviceMetric ramPerc) {
-        this.ramPerc = ramPerc;
-    }
-
-    public DeviceMetric getIsMoving() {
-        return isMoving;
-    }
-
-    public void setIsMoving(DeviceMetric isMoving) {
-        this.isMoving = isMoving;
-    }
-
-    public DeviceMetric getLatitude() {
-        return latitude;
-    }
-
-    public void setLatitude(DeviceMetric latitude) {
-        this.latitude = latitude;
-    }
-
-    public DeviceMetric getLongitude() {
-        return longitude;
-    }
-
-    public void setLongitude(DeviceMetric longitude) {
-        this.longitude = longitude;
-    }
-
-    @Override
-    public void onLocationChanged(Location location)
-    {
-        if(location!=null)
-        {
-            DeviceMetric latMetric = getLatitude();
-            DeviceMetric lngMetric = getLongitude();
-
-            latMetric.setDeviceMetricValue(String.valueOf(location.getLatitude()));
-            lngMetric.setDeviceMetricValue(String.valueOf(location.getLongitude()));
-
-            setLatitude(latMetric);
-            setLongitude(lngMetric);
-
-            getOtherMetrics();
-            loadOtherMetrics();
-        }
-    }
-
-    @Override
-    public void onStatusChanged(String provider, int status, Bundle extras) {
-
-    }
-
-    @Override
-    public void onProviderEnabled(String provider) {
-
-    }
-
-    @Override
-    public void onProviderDisabled(String provider) {
-
-    }
 
     @Override
     public void onSensorChanged(SensorEvent event)
     {
 
-        DeviceMetric isMovingMetric = getIsMoving();
+        DeviceMetric isMovingMetric = StoreMetricsContainer.getIsMoving();
 
         if(event.sensor.getType() == Sensor.TYPE_ACCELEROMETER)
         {
@@ -675,26 +398,40 @@ public class MainActivity extends Activity implements SensorEventListener,
             if(mAccel>1)
             {
                 isMovingMetric.setDeviceMetricValue("MOVING");
-                //isMoving = "MOVING";
+                isMovingMetric.setIsAttentionRequired(0);
             }
             else
             {
-                //isMoving = "NOT MOVING";
                 isMovingMetric.setDeviceMetricValue("NOT MOVING");
             }
 
-            setIsMoving(isMovingMetric);
-            //txtIsMoving.setText("Device Movement:\n" + isMoving);
+            //setIsMoving(isMovingMetric);
 
-            getOtherMetrics();
-            loadOtherMetrics();
+            otherListAdapter.notifyDataSetChanged();
         }
 
     }
 
     @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {
+    public void onAccuracyChanged(Sensor sensor, int accuracy)
+    {
 
+    }
+
+    @Override
+    protected void onStart()
+    {
+        super.onStart();
+        LocalBroadcastManager.getInstance(this).registerReceiver(receiver, new IntentFilter(BROADCAST_RESULT));
+        LocalBroadcastManager.getInstance(this).registerReceiver(batteryReceiver, new IntentFilter(BATTERYCHANGED_BROADCAST));
+    }
+
+    @Override
+    protected void onStop()
+    {
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(receiver);
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(batteryReceiver);
+        super.onStop();
     }
 
     @Override
@@ -702,13 +439,120 @@ public class MainActivity extends Activity implements SensorEventListener,
     {
         super.onResume();
         sensorManager.registerListener(this, accelorometer, SensorManager.SENSOR_DELAY_UI);
+        mGoogleApiClient.connect();
         shouldThreadRun = true;
         startRAMCPUThread();
 
         setDeviceMetrics();
         loadDeviceMetrics();
-        getOtherMetrics();
+        loadBatteryMetrics();
         loadOtherMetrics();
+
+        Log.i("MainActivity", "Setting Screen Name to 'Device Metrics'");
+
+        sendDeviceandOtherInfoToGA();
+    }
+
+    private void sendDeviceandOtherInfoToGA()
+    {
+        String strDeviceSerialNumber = GetStoreMetrics.getSerialNumber();
+
+        mTracker.setScreenName("Device Metrics");
+        mTracker.send(new HitBuilders.ScreenViewBuilder().build());
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgPerc()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgPerc()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgPerc()).isAttentionRequired())
+                .build());
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgMB()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgMB()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getDeviceStrgMB()).isAttentionRequired())
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppID()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppID()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppID()).isAttentionRequired())
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppName()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppName()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getFrgrdAppName()).isAttentionRequired())
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getWifiName()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getWifiName()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getWifiName()).isAttentionRequired())
+                .build());
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getWifiStrngth()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getWifiStrngth()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getWifiStrngth()).isAttentionRequired())
+                .build());
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getDeviceIP()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getDeviceIP()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getDeviceIP()).isAttentionRequired())
+                .build());
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getDeviceGatewayMetric()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getDeviceGatewayMetric()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getDeviceGatewayMetric()).isAttentionRequired())
+                .build());
+
+
+        //cpu info not included for now
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getRamInfo()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getRamInfo()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getRamInfo()).isAttentionRequired())
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getRamPerc()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getRamPerc()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getRamPerc()).isAttentionRequired())
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getIsMoving()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getIsMoving()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getIsMoving()).isAttentionRequired())
+                .build());
+
+        if(!Build.MODEL.equals("MC40N0"))
+        {
+            mTracker.send(new HitBuilders.EventBuilder()
+                    .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getLatitude()).getDeviceMetricName())
+                    .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getLatitude()).getDeviceMetricValue())
+                    .setCustomDimension(3, strDeviceSerialNumber)
+                    .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getLatitude()).isAttentionRequired())
+                    .build());
+
+            mTracker.send(new HitBuilders.EventBuilder()
+                    .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getLongitude()).getDeviceMetricName())
+                    .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getLongitude()).getDeviceMetricValue())
+                    .setCustomDimension(3, strDeviceSerialNumber)
+                    .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getLongitude()).isAttentionRequired())
+                    .build());
+        }
+
+        analytics.dispatchLocalHits();
     }
 
     @Override
@@ -716,8 +560,78 @@ public class MainActivity extends Activity implements SensorEventListener,
         super.onPause();
         sensorManager.unregisterListener(this);
         shouldThreadRun = false;
+
+        //Disconnect from API onPause()
+        if (mGoogleApiClient.isConnected())
+        {
+            LocationServices.FusedLocationApi.removeLocationUpdates(mGoogleApiClient, this);
+            mGoogleApiClient.disconnect();
+        }
+
+        sendBatteryInfoToGA();
     }
 
+    private void sendBatteryInfoToGA()
+    {
+        String strDeviceSerialNumber = GetStoreMetrics.getSerialNumber();
+
+        mTracker.setScreenName("Device Metrics");
+        mTracker.send(new HitBuilders.ScreenViewBuilder().build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatteryHealth()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatteryHealth()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatteryHealth()).isAttentionRequired)
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatteryChargeLvl()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatteryChargeLvl()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatteryChargeLvl()).isAttentionRequired)
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatteryTmp()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatteryTmp()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatteryTmp()).isAttentionRequired)
+                .build());
+
+        mTracker.send(new HitBuilders.EventBuilder()
+                .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatteryChrgSts()).getDeviceMetricName())
+                .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatteryChrgSts()).getDeviceMetricValue())
+                .setCustomDimension(3, strDeviceSerialNumber)
+                .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatteryChrgSts()).isAttentionRequired)
+                .build());
+
+        if(Build.MODEL.equals("MC40N0"))
+        {
+            mTracker.send(new HitBuilders.EventBuilder()
+                    .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatteryMfd()).getDeviceMetricName())
+                    .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatteryMfd()).getDeviceMetricValue())
+                    .setCustomDimension(3, strDeviceSerialNumber)
+                    .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatteryMfd()).isAttentionRequired)
+                    .build());
+
+            mTracker.send(new HitBuilders.EventBuilder()
+                    .setCustomDimension(1, ((DeviceMetric) StoreMetricsContainer.getBatterySerial()).getDeviceMetricName())
+                    .setCustomDimension(2, ((DeviceMetric) StoreMetricsContainer.getBatterySerial()).getDeviceMetricValue())
+                    .setCustomDimension(3, strDeviceSerialNumber)
+                    .setCustomMetric(1, ((DeviceMetric) StoreMetricsContainer.getBatterySerial()).isAttentionRequired)
+                    .build());
+        }
+
+        analytics.dispatchLocalHits();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+    }
+
+    /*
     private void getCurrentLocation()
     {
         String locationString="Device Latitude, Device Longitude:ERROR";
@@ -764,16 +678,166 @@ public class MainActivity extends Activity implements SensorEventListener,
             else
             {
                 Toast.makeText(this, "Enable GPS or connect to a network to find location", Toast.LENGTH_SHORT).show();
+                return;
             }
+
+
+            latMetric.setDeviceMetricValue(locationLat);
+            lngMetric.setDeviceMetricValue(locationLng);
+            setLatitude(latMetric);
+            setLongitude(lngMetric);
+            otherListAdapter.notifyDataSetChanged();
         }
         catch (SecurityException ex)
         {
             ex.printStackTrace();
         }
 
-        latMetric.setDeviceMetricValue(locationLat);
-        lngMetric.setDeviceMetricValue(locationLng);
-        setLatitude(latMetric);
-        setLongitude(lngMetric);
     }
+    */
+
+    private int getCpuUsageStatistic()
+    {
+
+        String tempString = executeTop();
+        int totalUsage=0;
+
+        tempString = tempString.replaceAll(",", "");
+        tempString = tempString.replaceAll("User", "");
+        tempString = tempString.replaceAll("System", "");
+        tempString = tempString.replaceAll("IOW", "");
+        tempString = tempString.replaceAll("IRQ", "");
+        tempString = tempString.replaceAll("%", "");
+        for (int i = 0; i < 10; i++) {
+            tempString = tempString.replaceAll("  ", " ");
+        }
+        tempString = tempString.trim();
+        String[] myString = tempString.split(" ");
+        int[] cpuUsageAsInt = new int[myString.length];
+        for (int i = 0; i < myString.length; i++) {
+            myString[i] = myString[i].trim();
+            cpuUsageAsInt[i] = Integer.parseInt(myString[i]);
+            totalUsage+=cpuUsageAsInt[i];
+        }
+        return totalUsage;
+    }
+
+    private String executeTop() {
+        java.lang.Process p = null;
+        BufferedReader in = null;
+        String returnString = null;
+        try {
+            p = Runtime.getRuntime().exec("top -n 1");
+            in = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            while (returnString == null || returnString.contentEquals("")) {
+                returnString = in.readLine();
+            }
+        } catch (IOException e) {
+            Log.e("executeTop", "error in getting first line of top");
+            e.printStackTrace();
+        } finally {
+            try {
+                in.close();
+                p.destroy();
+            } catch (IOException e) {
+                Log.e("executeTop",
+                        "error in closing and destroying top process");
+                e.printStackTrace();
+            }
+        }
+        return returnString;
+    }
+
+
+    @Override
+    public void onConnected(Bundle bundle)
+    {
+        Location location = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
+
+        if(location == null)
+        {
+            if(mGoogleApiClient.isConnected())
+            {
+                LocationServices.FusedLocationApi.requestLocationUpdates(mGoogleApiClient, mLocationRequest, this);
+            }
+            Toast.makeText(this,"Please enable Location services, if not enabled already",Toast.LENGTH_SHORT).show();
+//            startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+        }
+        else
+        {
+            currentLatitude = location.getLatitude();
+            currentLongitude = location.getLongitude();
+            DeviceMetric metricLat = StoreMetricsContainer.getLatitude();
+            DeviceMetric metricLng = StoreMetricsContainer.getLongitude();
+            metricLat.setDeviceMetricName("Latitude");
+            metricLat.setDeviceMetricValue(String.valueOf(currentLatitude));
+            if(currentLongitude<=0)
+                metricLat.setIsAttentionRequired(1);
+            else
+                metricLat.setIsAttentionRequired(0);
+            //setLatitude(metricLat);
+
+            metricLng.setDeviceMetricName("Longitude");
+            metricLng.setDeviceMetricValue(String.valueOf(currentLongitude));
+            if(currentLongitude<=0)
+                metricLng.setIsAttentionRequired(1);
+            else
+                metricLng.setIsAttentionRequired(0);
+
+            //setLongitude(metricLng);
+
+        }
+    }
+
+    @Override
+    public void onConnectionSuspended(int i)
+    {
+
+    }
+
+    @Override
+    public void onConnectionFailed(ConnectionResult connectionResult)
+    {
+        if(connectionResult.hasResolution())
+        {
+            try
+            {
+                connectionResult.startResolutionForResult(this,CONNECTION_FAILURE_RESOLUTION_REQUEST);
+            }
+            catch (IntentSender.SendIntentException e)
+            {
+                e.printStackTrace();
+            }
+        }
+        else
+        {
+            Log.e("Error","Location Services failed with the code"+connectionResult.getErrorCode());
+
+            if(connectionResult.getErrorCode() == ConnectionResult.SERVICE_MISSING)
+            {
+                Toast.makeText(this,"Location Services not available on this device", Toast.LENGTH_SHORT).show();
+            }
+        }
+
+    }
+
+
+    @Override
+    public void onLocationChanged(Location location)
+    {
+        if(location!=null)
+        {
+            DeviceMetric latMetric = StoreMetricsContainer.getLatitude();
+            DeviceMetric lngMetric = StoreMetricsContainer.getLongitude();
+
+            latMetric.setDeviceMetricValue(String.valueOf(location.getLatitude()));
+            lngMetric.setDeviceMetricValue(String.valueOf(location.getLongitude()));
+
+            //setLatitude(latMetric);
+            //setLongitude(lngMetric);
+
+            otherListAdapter.notifyDataSetChanged();
+        }
+    }
+
 }

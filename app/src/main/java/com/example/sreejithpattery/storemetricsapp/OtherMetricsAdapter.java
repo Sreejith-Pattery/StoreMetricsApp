@@ -42,27 +42,27 @@ public class OtherMetricsAdapter extends ArrayAdapter<DeviceMetric>
             switch (currentDeviceMetric.getDeviceMetricName())
             {
                 case "Current CPU Usage %":
-                    currentDeviceMetric = mainActivity.getCpuInfo();
+                    currentDeviceMetric = StoreMetricsContainer.getCpuInfo();
                     break;
 
                 case "RAM Usage MB":
-                    currentDeviceMetric = mainActivity.getRamInfo();
+                    currentDeviceMetric = StoreMetricsContainer.getRamInfo();
                     break;
 
                 case "RAM Usage %":
-                    currentDeviceMetric = mainActivity.getRamPerc();
+                    currentDeviceMetric = StoreMetricsContainer.getRamPerc();
                     break;
 
                 case "Device Movement":
-                    currentDeviceMetric = mainActivity.getIsMoving();
+                    currentDeviceMetric = StoreMetricsContainer.getIsMoving();
                     break;
 
                 case "Device latitude":
-                    currentDeviceMetric = mainActivity.getLatitude();
+                    currentDeviceMetric = StoreMetricsContainer.getLatitude();
                     break;
 
                 case "Device longitude":
-                    currentDeviceMetric = mainActivity.getLongitude();
+                    currentDeviceMetric = StoreMetricsContainer.getLongitude();
                     break;
 
                 default:

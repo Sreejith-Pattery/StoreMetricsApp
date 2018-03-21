@@ -19,16 +19,16 @@ import java.util.Date;
 public class PeriodicTaskReceiver extends BroadcastReceiver
 {
     private static final String TAG = "Periodic Task Receiver";
-    private static final String INTENT_ACTION = "com.example.sreejithpattery.myserviceexample.PERIODIC_TASK_HEART_BEAT";
-    private static final String BROADCAST_RESULT = "com.example.sreejithpattery.myserviceexample.service_processed";
-    private static final String BROADCAST_MESSAGE = "com.example.sreejithpattery.myserviceexample.broadcast_message";
+    private static final String INTENT_ACTION = "com.example.sreejithpattery.storemetricsapp.PERIODIC_TASK_HEART_BEAT";
+    private static final String BROADCAST_RESULT = "com.example.sreejithpattery.storemetricsapp.service_processed";
+    private static final String BROADCAST_MESSAGE = "com.example.sreejithpattery.storemetricsapp.broadcast_message";
 
     @Override
     public void onReceive(Context context, Intent intent)
     {
         if(!intent.getAction().isEmpty()&& !(intent.getAction()==null))
         {
-            MyApplication myApplication = (MyApplication) context.getApplicationContext();
+            StoreMetricsAppApplication myApplication = (StoreMetricsAppApplication) context.getApplicationContext();
             SharedPreferences sharedPreferences = myApplication.getSharedPreferences("MySharedPreferences",Context.MODE_PRIVATE);
 
             if(intent.getAction().equals("android.intent.action.BATTERY_LOW"))
@@ -45,33 +45,17 @@ public class PeriodicTaskReceiver extends BroadcastReceiver
             {
                 doPeriodicTask(context,myApplication);
             }
-
         }
-
     }
 
-    private void doPeriodicTask(Context context, MyApplication myApplication)
+    private void doPeriodicTask(Context context, StoreMetricsAppApplication myApplication)
     {
-        Toast.makeText(context,"Period task in progress",Toast.LENGTH_SHORT).show();
-
-        sendUiUpdateBroadcast(context);
-
+        StoreMetricsContainer.setDeviceMetrics();
+        sendUpdateBroadcast(context);
     }
 
-    private void sendUiUpdateBroadcast(Context context)
-    {
-        SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
-        String alarmTime = dateFormat.format(new Date());
-        LocalBroadcastManager localBroadcastManager = LocalBroadcastManager.getInstance(context);
 
-        Intent intent = new Intent(BROADCAST_RESULT);
-        intent.putExtra(BROADCAST_MESSAGE,alarmTime);
-
-        localBroadcastManager.sendBroadcast(intent);
-
-    }
-
-    public void restartPeriodicTaskHeartBeat(Context context, MyApplication myApplication)
+    public void restartPeriodicTaskHeartBeat(Context context, StoreMetricsAppApplication myApplication)
     {
         SharedPreferences sharedPreferences = myApplication.getSharedPreferences("MySharedPreferences",Context.MODE_PRIVATE);
         boolean isBatteryOK = sharedPreferences.getBoolean("BACKGROUND_SERVICE_BATTERY_CONTROL", true);
@@ -83,8 +67,8 @@ public class PeriodicTaskReceiver extends BroadcastReceiver
             AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
             alarmIntent.setAction(INTENT_ACTION);
             PendingIntent pendingIntent = PendingIntent.getBroadcast(context,0,alarmIntent,0);
-            //alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime(),AlarmManager.INTERVAL_FIFTEEN_MINUTES,pendingIntent);
-            alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime(),60000L,pendingIntent);
+            alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime(),AlarmManager.INTERVAL_FIFTEEN_MINUTES,pendingIntent);
+            //alarmManager.setInexactRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime(),60000L,pendingIntent);
         }
     }
 
@@ -98,6 +82,16 @@ public class PeriodicTaskReceiver extends BroadcastReceiver
     }
 
 
+    private void sendUpdateBroadcast(Context context)
+    {
+        SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+        String alarmTime = dateFormat.format(new Date());
+        LocalBroadcastManager localBroadcastManager = LocalBroadcastManager.getInstance(context);
 
+        Intent intent = new Intent(BROADCAST_RESULT);
+        intent.putExtra(BROADCAST_MESSAGE,alarmTime);
 
+        localBroadcastManager.sendBroadcast(intent);
+
+    }
 }
